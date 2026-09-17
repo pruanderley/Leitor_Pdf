@@ -1,7 +1,7 @@
 // ============================================
 // SERVICE WORKER - LEITOR DE PDF PWA
 // ============================================
-const CACHE_NAME = 'leitor-pdf-v6';
+const CACHE_NAME = 'leitor-pdf-v7';
 const urlsToCache = [
     './',
     './index.html',

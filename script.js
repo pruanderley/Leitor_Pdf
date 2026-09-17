@@ -80,7 +80,6 @@ function showToast(message, type = 'info', duration = 3000) {
 // ============================================
 // HELPERS
 // ============================================
-// Aguarda o navegador calcular o layout (2 frames)
 function nextFrame() {
     return new Promise(resolve => {
         requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -129,14 +128,10 @@ async function loadPDF(file) {
         els.pageInput.max = pdf.numPages;
         els.zoomLevel.textContent = '100%';
 
-        // Mostra viewer e esconde welcome
         els.welcomeScreen.hidden = true;
         els.viewer.hidden = false;
 
-        // ⚠️ IMPORTANTE: aguarda o navegador calcular o layout
-        // antes de medir o container, senão clientHeight = 0
         await nextFrame();
-
         await renderPage(1);
 
         showToast(`✅ PDF carregado: ${pdf.numPages} páginas`, 'success');
@@ -164,23 +159,16 @@ async function renderPage(pageNum) {
         
         const dpr = window.devicePixelRatio || 1;
         
-        // Mede o container — com fallback caso ainda esteja com 0
         let containerWidth = els.pdfContainer.clientWidth;
         let containerHeight = els.pdfContainer.clientHeight;
         
-        console.log('📐 Container:', containerWidth, 'x', containerHeight);
-        
-        // Fallback: se o container estiver zerado, usa a janela
         if (!containerWidth || containerWidth < 50) {
             containerWidth = window.innerWidth;
-            console.warn('⚠️ Largura do container = 0, usando window.innerWidth:', containerWidth);
         }
         if (!containerHeight || containerHeight < 50) {
             containerHeight = window.innerHeight - 200;
-            console.warn('⚠️ Altura do container = 0, usando fallback:', containerHeight);
         }
         
-        // Espaço interno (padding do container)
         const innerWidth = containerWidth - 32;
         const innerHeight = containerHeight - 32;
         
@@ -190,16 +178,12 @@ async function renderPage(pageNum) {
         const scaleHeight = innerHeight / baseViewport.height;
         let scaleToFit = Math.min(scaleWidth, scaleHeight);
         
-        // Segurança: escala mínima
         if (!isFinite(scaleToFit) || scaleToFit <= 0) {
-            console.warn('⚠️ Escala inválida, usando 1.0');
             scaleToFit = 1.0;
         }
         
         const finalScale = scaleToFit * state.scale;
         const viewport = page.getViewport({ scale: finalScale });
-
-        console.log('📐 Canvas:', Math.floor(viewport.width), 'x', Math.floor(viewport.height), '| escala:', finalScale.toFixed(3));
 
         const canvas = els.pdfCanvas;
         const context = canvas.getContext('2d', { alpha: false });
@@ -223,20 +207,16 @@ async function renderPage(pageNum) {
         state.renderTask = page.render(renderContext);
         await state.renderTask.promise;
 
-        // Atualiza controles
         state.currentPage = pageNum;
         els.pdfPages.textContent = `Página ${pageNum} de ${state.totalPages}`;
         els.pageInput.value = pageNum;
         els.btnPrev.disabled = pageNum <= 1;
         els.btnNext.disabled = pageNum >= state.totalPages;
 
-        console.log('✅ Página', pageNum, 'renderizada');
-
         state.rendering = false;
     } catch (error) {
         if (error.name !== 'RenderingCancelledException') {
             console.error('Erro ao renderizar:', error);
-            showToast('❌ Erro ao renderizar página', 'error');
         }
         state.rendering = false;
     }
@@ -247,23 +227,29 @@ async function renderPage(pageNum) {
 // ============================================
 function nextPage() {
     if (state.currentPage < state.totalPages) {
+        state.scale = 1.0;
+        els.zoomLevel.textContent = '100%';
         renderPage(state.currentPage + 1);
     }
 }
 
 function prevPage() {
     if (state.currentPage > 1) {
+        state.scale = 1.0;
+        els.zoomLevel.textContent = '100%';
         renderPage(state.currentPage - 1);
     }
 }
 
 function goToPage(num) {
     const page = Math.max(1, Math.min(num, state.totalPages));
+    state.scale = 1.0;
+    els.zoomLevel.textContent = '100%';
     renderPage(page);
 }
 
 // ============================================
-// ZOOM
+// ZOOM (botões)
 // ============================================
 function zoomIn() {
     if (state.scale >= 4) return;
@@ -278,6 +264,127 @@ function zoomOut() {
     els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
     renderPage(state.currentPage);
 }
+
+// ============================================
+// PINCH-TO-ZOOM (zoom com dois dedos) + PAN
+// ============================================
+const touch = {
+    mode: null,          // 'pan' | 'pinch' | null
+    startX: 0,
+    startY: 0,
+    startScrollLeft: 0,
+    startScrollTop: 0,
+    startDistance: 0,
+    startScale: 1,
+    pendingScale: 1,
+    lastTapTime: 0,
+    isZooming: false
+};
+
+function getDistance(t1, t2) {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.hypot(dx, dy);
+}
+
+els.pdfContainer.addEventListener('touchstart', (e) => {
+    // Dois dedos: PINCH
+    if (e.touches.length === 2) {
+        e.preventDefault();
+        touch.mode = 'pinch';
+        touch.startDistance = getDistance(e.touches[0], e.touches[1]);
+        touch.startScale = state.scale;
+        touch.pendingScale = state.scale;
+        touch.isZooming = false;
+        return;
+    }
+
+    // Um dedo: PAN ou double-tap
+    if (e.touches.length === 1) {
+        touch.mode = 'pan';
+        touch.startX = e.touches[0].clientX;
+        touch.startY = e.touches[0].clientY;
+        touch.startScrollLeft = els.pdfContainer.scrollLeft;
+        touch.startScrollTop = els.pdfContainer.scrollTop;
+
+        // Detecta double-tap para zoom rápido
+        const now = Date.now();
+        if (now - touch.lastTapTime < 300) {
+            e.preventDefault();
+            if (state.scale > 1.05) {
+                state.scale = 1.0;
+            } else {
+                state.scale = 2.0;
+            }
+            els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
+            renderPage(state.currentPage);
+            touch.lastTapTime = 0;
+            touch.mode = null;
+            return;
+        }
+        touch.lastTapTime = now;
+    }
+}, { passive: false });
+
+els.pdfContainer.addEventListener('touchmove', (e) => {
+    // PINCH: dois dedos → calcula nova escala
+    if (touch.mode === 'pinch' && e.touches.length === 2) {
+        e.preventDefault();
+        const distance = getDistance(e.touches[0], e.touches[1]);
+        const ratio = distance / touch.startDistance;
+        let newScale = touch.startScale * ratio;
+        newScale = Math.max(0.25, Math.min(4, newScale));
+        
+        touch.pendingScale = newScale;
+        touch.isZooming = true;
+        
+        // Atualiza a % em tempo real
+        els.zoomLevel.textContent = Math.round(newScale * 100) + '%';
+        return;
+    }
+
+    // PAN: um dedo → rola o container
+    if (touch.mode === 'pan' && e.touches.length === 1) {
+        const dx = e.touches[0].clientX - touch.startX;
+        const dy = e.touches[0].clientY - touch.startY;
+        
+        // Só previne se realmente está arrastando (evita bloquear cliques)
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            e.preventDefault();
+            els.pdfContainer.scrollLeft = touch.startScrollLeft - dx;
+            els.pdfContainer.scrollTop = touch.startScrollTop - dy;
+        }
+    }
+}, { passive: false });
+
+els.pdfContainer.addEventListener('touchend', (e) => {
+    // Finalizou pinch → aplica o zoom de verdade (renderiza)
+    if (touch.mode === 'pinch') {
+        if (touch.isZooming && Math.abs(touch.pendingScale - state.scale) > 0.03) {
+            state.scale = touch.pendingScale;
+            els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
+            renderPage(state.currentPage);
+        }
+        touch.isZooming = false;
+    }
+
+    // Se ainda há dedos na tela, muda o modo
+    if (e.touches.length === 1) {
+        // Passou de 2 → 1 dedos: reinicia como pan
+        touch.mode = 'pan';
+        touch.startX = e.touches[0].clientX;
+        touch.startY = e.touches[0].clientY;
+        touch.startScrollLeft = els.pdfContainer.scrollLeft;
+        touch.startScrollTop = els.pdfContainer.scrollTop;
+    } else if (e.touches.length === 0) {
+        touch.mode = null;
+    }
+}, { passive: true });
+
+els.pdfContainer.addEventListener('touchcancel', () => {
+    touch.mode = null;
+    touch.isZooming = false;
+});
 
 // ============================================
 // FULLSCREEN
@@ -539,10 +646,22 @@ els.btnNext.addEventListener('click', nextPage);
 els.btnPrev.addEventListener('click', prevPage);
 els.pageInput.addEventListener('change', (e) => goToPage(parseInt(e.target.value)));
 
-// Zoom
+// Zoom (botões)
 els.btnZoomIn.addEventListener('click', zoomIn);
 els.btnZoomOut.addEventListener('click', zoomOut);
 els.btnFullscreen.addEventListener('click', toggleFullscreen);
+
+// Ctrl + scroll → zoom (desktop)
+els.pdfContainer.addEventListener('wheel', (e) => {
+    if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        if (e.deltaY < 0) {
+            zoomIn();
+        } else {
+            zoomOut();
+        }
+    }
+}, { passive: false });
 
 // Scan QR
 els.btnScan.addEventListener('click', openScannerModal);
@@ -656,7 +775,7 @@ if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js', { scope: './' })
             .then(registration => {
-                console.log('✅ Service Worker registrado com sucesso');
+                console.log('✅ Service Worker registrado');
                 console.log('📍 Escopo:', registration.scope);
             })
             .catch(err => {
@@ -665,12 +784,12 @@ if ('serviceWorker' in navigator) {
     });
 }
 
-// Prevenir zoom com gestos
+// Prevenir zoom de página com gestos
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 
 // ============================================
 // INICIALIZAÇÃO
 // ============================================
-console.log('📄 Leitor de PDF v1.1');
+console.log('📄 Leitor de PDF v1.2');
 console.log('👨‍💻 Desenvolvedor: Pr Uanderley');
-console.log('✨ Recursos: Alta resolução, QR Code, Histórico, PWA');
+console.log('✨ Recursos: Pinch-to-zoom, pan, double-tap, QR Code, PWA');

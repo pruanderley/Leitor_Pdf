@@ -345,7 +345,10 @@ body {
     -webkit-overflow-scrolling: touch;
     min-height: 0;
     width: 100%;
-    touch-action: pan-x pan-y;
+    /* touch-action: none -> desabilita gestos nativos (pan/zoom do navegador)
+       para que possamos implementar pan e pinch-to-zoom manualmente no JS */
+    touch-action: none;
+    overscroll-behavior: contain;
 }
 
 #pdfCanvas {
@@ -355,6 +358,11 @@ body {
     background: white;
     display: block;
     flex-shrink: 0;
+    /* Impede seleção/arraste da imagem ao arrastar com o dedo */
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
+    pointer-events: none;
 }
 
 .viewer-footer {
