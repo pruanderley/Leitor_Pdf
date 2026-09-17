@@ -30,7 +30,6 @@ const els = {
     welcomeScreen: $('welcomeScreen'),
     viewer: $('viewer'),
     dropZone: $('dropZone'),
-    dirInput: $('dirInput'),
     fileInput: $('fileInput'),
     pdfCanvas: $('pdfCanvas'),
     pdfContainer: $('pdfContainer'),
@@ -501,68 +500,6 @@ els.fileInput.addEventListener('change', (e) => {
     e.target.value = '';
 });
 
-// Input de diretório (CORRIGIDO - aceita por extensão)
-els.dirInput.addEventListener('change', (e) => {
-    const files = Array.from(e.target.files);
-    
-    console.log('📁 Arquivos no diretório:', files.length);
-    
-    // Filtra PDFs por tipo OU extensão
-    const pdfs = files.filter(f => isPDF(f));
-    
-    console.log('📄 PDFs encontrados:', pdfs.length);
-    
-    if (pdfs.length === 0) {
-        showToast('❌ Nenhum PDF encontrado no diretório', 'error');
-        return;
-    }
-    
-    if (pdfs.length === 1) {
-        loadPDF(pdfs[0]);
-    } else {
-        showPdfList(pdfs);
-    }
-    
-    e.target.value = '';
-});
-
-// Lista de PDFs do diretório
-function showPdfList(pdfs) {
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.style.zIndex = '3000';
-    modal.innerHTML = `
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3><i class="fas fa-folder-open"></i> Selecione um PDF (${pdfs.length})</h3>
-                <button class="btn-close" data-close>
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
-            <div class="modal-body" style="max-height:60vh;overflow-y:auto;">
-                ${pdfs.map((pdf, i) => `
-                    <button class="btn btn-secondary" style="margin-bottom:8px;justify-content:flex-start;text-align:left;" data-index="${i}">
-                        <i class="fas fa-file-pdf" style="color:#e74c3c;flex-shrink:0;"></i>
-                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${pdf.name}</span>
-                    </button>
-                `).join('')}
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-    
-    modal.querySelector('[data-close]').addEventListener('click', () => modal.remove());
-    
-    modal.querySelectorAll('button[data-index]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const index = parseInt(btn.dataset.index);
-            loadPDF(pdfs[index]);
-            modal.remove();
-        });
-    });
-}
-
 // Botões de navegação
 els.btnNext.addEventListener('click', nextPage);
 els.btnPrev.addEventListener('click', prevPage);
@@ -605,11 +542,10 @@ document.querySelectorAll('.nav-item').forEach(item => {
         
         switch(id) {
             case 'navOpen': els.fileInput.click(); break;
-            case 'navDir': els.dirInput.click(); break;
             case 'navScan': openScannerModal(); break;
             case 'navTheme': toggleTheme(); break;
             case 'navAbout': 
-                showToast('📄 PDF Reader Pro v1.0 — Leitor de PDF com QR Code', 'info', 5000); 
+                showToast('📄 Leitor de PDF, grátis. Desenvolvedor: Pr Uanderley', 'info', 5000); 
                 break;
             case 'navHistory':
                 if (state.history.length === 0) {

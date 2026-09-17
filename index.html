@@ -57,30 +57,15 @@
                     <span>Arraste e solte o PDF aqui</span>
                     <span class="drop-or">ou</span>
                     
-                    <!-- Entrada de diretório -->
-                    <label for="dirInput" class="btn btn-primary">
-                        <i class="fas fa-folder-tree"></i>
-                        Abrir do diretório
-                    </label>
-                    <input 
-                        type="file" 
-                        id="dirInput" 
-                        accept="application/pdf" 
-                        webkitdirectory 
-                        directory 
-                        multiple 
-                        hidden
-                    >
-                    
                     <!-- Entrada de arquivo único -->
-                    <label for="fileInput" class="btn btn-secondary">
+                    <label for="fileInput" class="btn btn-primary">
                         <i class="fas fa-file-pdf"></i>
                         Selecionar PDF
                     </label>
                     <input 
                         type="file" 
                         id="fileInput" 
-                        accept="application/pdf" 
+                        accept="application/pdf,.pdf" 
                         hidden
                     >
                 </div>
@@ -237,10 +222,6 @@
                 <button class="nav-item" id="navOpen">
                     <i class="fas fa-folder-open"></i>
                     Abrir PDF
-                </button>
-                <button class="nav-item" id="navDir">
-                    <i class="fas fa-folder-tree"></i>
-                    Abrir diretório
                 </button>
                 <button class="nav-item" id="navScan">
                     <i class="fas fa-qrcode"></i>

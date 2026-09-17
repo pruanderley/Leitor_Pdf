@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdf-reader-v2';
+const CACHE_NAME = 'pdf-reader-v3';
 const urlsToCache = [
     '/',
     '/index.html',
