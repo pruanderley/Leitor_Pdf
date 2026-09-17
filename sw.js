@@ -1,10 +1,10 @@
-const CACHE_NAME = 'pdf-reader-v3';
+const CACHE_NAME = 'pdf-reader-v4';
 const urlsToCache = [
-    '/',
-    '/index.html',
-    '/style.css',
-    '/script.js',
-    '/manifest.json',
+    './',
+    './index.html',
+    './style.css',
+    './script.js',
+    './manifest.json',
     'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
