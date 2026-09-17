@@ -18,7 +18,19 @@ const state = {
     rendering: false,
     renderTask: null,
     html5QrCode: null,
-    history: JSON.parse(localStorage.getItem('pdfHistory') || '[]')
+    history: JSON.parse(localStorage.getItem('pdfHistory') || '[]'),
+
+    // Modo de leitura: 'single' (página única) ou 'continuous' (rolagem contínua)
+    mode: localStorage.getItem('pdfReadMode') || 'single',
+    // Dimensões da página 1 em escala 1, usadas para estimar o tamanho de todas
+    // as páginas no modo contínuo antes de renderizá-las (assume páginas uniformes)
+    pageAspect: null,
+    // Um <div class="page-wrapper"> por página, indexado por (pageNum - 1)
+    wrapperEls: [],
+    // Páginas atualmente com canvas renderizado (modo contínuo)
+    renderedSet: new Set(),
+    observer: null,
+    scrollRAF: null
 };
 
 // ============================================
@@ -31,8 +43,9 @@ const els = {
     viewer: $('viewer'),
     dropZone: $('dropZone'),
     fileInput: $('fileInput'),
-    pdfCanvas: $('pdfCanvas'),
     pdfContainer: $('pdfContainer'),
+    pagesList: $('pagesList'),
+    btnToggleMode: $('btnToggleMode'),
     pdfName: $('pdfName'),
     pdfPages: $('pdfPages'),
     totalPages: $('totalPages'),
@@ -128,8 +141,17 @@ async function loadPDF(file) {
         els.welcomeScreen.hidden = true;
         els.viewer.hidden = false;
 
-        // Renderiza primeira página
-        await renderPage(1);
+        // Guarda as dimensões da página 1 (assume páginas uniformes) para
+        // calcular o layout do modo contínuo sem precisar abrir todas as páginas
+        await computeBaseAspect();
+
+        if (state.mode === 'continuous') {
+            buildContinuousMode();
+            requestAnimationFrame(() => renderContinuousPage(1));
+        } else {
+            buildSingleMode();
+            await renderSinglePage(1);
+        }
 
         showToast(`✅ PDF carregado: ${pdf.numPages} páginas`, 'success');
     } catch (error) {
@@ -139,41 +161,225 @@ async function loadPDF(file) {
 }
 
 // ============================================
-// RENDERIZAÇÃO DE PÁGINA (ALTA RESOLUÇÃO)
+// LAYOUT: MODO PÁGINA ÚNICA vs MODO CONTÍNUO
 // ============================================
-async function renderPage(pageNum) {
+
+// Pega as dimensões da página 1 em escala 1. É usado como referência para
+// estimar a altura de TODAS as páginas no modo contínuo (assume documento
+// com páginas de tamanho uniforme, o caso comum: livros, contratos, apostilas).
+async function computeBaseAspect() {
+    const page = await state.pdfDoc.getPage(1);
+    const vp = page.getViewport({ scale: 1 });
+    state.pageAspect = { width: vp.width, height: vp.height };
+}
+
+function clearPagesList() {
+    if (state.observer) {
+        state.observer.disconnect();
+        state.observer = null;
+    }
+    els.pagesList.innerHTML = '';
+    els.pagesList.classList.remove('continuous');
+    state.wrapperEls = [];
+    state.renderedSet.clear();
+}
+
+function buildSingleMode() {
+    clearPagesList();
+    const wrapper = document.createElement('div');
+    wrapper.className = 'page-wrapper';
+    wrapper.appendChild(document.createElement('canvas'));
+    els.pagesList.appendChild(wrapper);
+    state.wrapperEls[0] = wrapper;
+}
+
+function buildContinuousMode() {
+    clearPagesList();
+    els.pagesList.classList.add('continuous');
+
+    const containerWidth = els.pdfContainer.clientWidth - 32;
+    const aspect = state.pageAspect;
+    const estWidth = containerWidth * state.scale;
+    const estHeight = estWidth * (aspect.height / aspect.width);
+
+    for (let i = 1; i <= state.totalPages; i++) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'page-wrapper';
+        wrapper.dataset.pageNum = i;
+        // Reserva o espaço da página antes de renderizar, pra rolagem não pular
+        wrapper.style.width = Math.floor(estWidth) + 'px';
+        wrapper.style.height = Math.floor(estHeight) + 'px';
+        els.pagesList.appendChild(wrapper);
+        state.wrapperEls[i - 1] = wrapper;
+    }
+
+    setupContinuousObserver();
+}
+
+// Recalcula o tamanho estimado de cada página quando o zoom muda ou a tela
+// é redimensionada, e força a re-renderização das páginas visíveis
+function rebuildContinuousSizes() {
+    const containerWidth = els.pdfContainer.clientWidth - 32;
+    const aspect = state.pageAspect;
+    const estWidth = containerWidth * state.scale;
+    const estHeight = estWidth * (aspect.height / aspect.width);
+
+    state.wrapperEls.forEach((wrapper) => {
+        wrapper.style.width = Math.floor(estWidth) + 'px';
+        wrapper.style.height = Math.floor(estHeight) + 'px';
+        const canvas = wrapper.querySelector('canvas');
+        if (canvas) canvas.remove();
+    });
+    state.renderedSet.clear();
+
+    // Re-observar força o IntersectionObserver a reavaliar o que está visível
+    if (state.observer) {
+        state.wrapperEls.forEach(w => state.observer.unobserve(w));
+        state.wrapperEls.forEach(w => state.observer.observe(w));
+    }
+}
+
+function setupContinuousObserver() {
+    if (state.observer) state.observer.disconnect();
+
+    state.observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            const pageNum = parseInt(entry.target.dataset.pageNum, 10);
+            if (entry.isIntersecting) {
+                renderContinuousPage(pageNum);
+            } else {
+                unrenderContinuousPage(pageNum, entry.target);
+            }
+        });
+    }, {
+        root: els.pdfContainer,
+        // Pré-carrega ~800px antes/depois da área visível, pra rolar sem esperar
+        rootMargin: '800px 0px',
+        threshold: 0.01
+    });
+
+    state.wrapperEls.forEach(w => state.observer.observe(w));
+}
+
+// Renderiza uma página dentro do modo contínuo (alta resolução, igual ao modo único)
+async function renderContinuousPage(pageNum) {
+    if (state.renderedSet.has(pageNum)) return;
+    state.renderedSet.add(pageNum);
+
+    try {
+        const page = await state.pdfDoc.getPage(pageNum);
+        const wrapper = state.wrapperEls[pageNum - 1];
+        if (!wrapper) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const containerWidth = els.pdfContainer.clientWidth - 32;
+        const baseViewport = page.getViewport({ scale: 1 });
+        const scaleToFit = containerWidth / baseViewport.width;
+        const finalScale = scaleToFit * state.scale;
+        const viewport = page.getViewport({ scale: finalScale });
+
+        let canvas = wrapper.querySelector('canvas');
+        if (!canvas) {
+            canvas = document.createElement('canvas');
+            wrapper.appendChild(canvas);
+        }
+        const context = canvas.getContext('2d', { alpha: false });
+
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = Math.floor(viewport.width) + 'px';
+        canvas.style.height = Math.floor(viewport.height) + 'px';
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Ajusta o wrapper para o tamanho real (a estimativa pode ter um leve erro)
+        wrapper.style.width = Math.floor(viewport.width) + 'px';
+        wrapper.style.height = Math.floor(viewport.height) + 'px';
+
+        await page.render({
+            canvasContext: context,
+            viewport: viewport,
+            intent: 'display'
+        }).promise;
+    } catch (error) {
+        if (error.name !== 'RenderingCancelledException') {
+            console.error(`Erro ao renderizar página ${pageNum}:`, error);
+        }
+        state.renderedSet.delete(pageNum);
+    }
+}
+
+// Libera o canvas de páginas que saíram da área pré-carregada, pra economizar
+// memória e CPU — essencial num notebook sem GPU dedicada
+function unrenderContinuousPage(pageNum, wrapper) {
+    if (!state.renderedSet.has(pageNum)) return;
+    state.renderedSet.delete(pageNum);
+    const canvas = wrapper.querySelector('canvas');
+    if (canvas) canvas.remove();
+}
+
+// Atualiza o indicador de página com base em qual página está mais perto
+// do centro da área visível durante a rolagem contínua
+function updateCurrentPageFromScroll() {
+    if (state.mode !== 'continuous' || state.wrapperEls.length === 0) return;
+
+    const containerRect = els.pdfContainer.getBoundingClientRect();
+    const centerY = containerRect.top + containerRect.height / 2;
+
+    let closestPage = state.currentPage;
+    let closestDist = Infinity;
+
+    state.wrapperEls.forEach((wrapper, idx) => {
+        const rect = wrapper.getBoundingClientRect();
+        const dist = Math.abs((rect.top + rect.height / 2) - centerY);
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestPage = idx + 1;
+        }
+    });
+
+    if (closestPage !== state.currentPage) {
+        state.currentPage = closestPage;
+        els.pdfPages.textContent = `Página ${closestPage} de ${state.totalPages}`;
+        els.pageInput.value = closestPage;
+        els.btnPrev.disabled = closestPage <= 1;
+        els.btnNext.disabled = closestPage >= state.totalPages;
+    }
+}
+
+// ============================================
+// RENDERIZAÇÃO DE PÁGINA — MODO PÁGINA ÚNICA (ALTA RESOLUÇÃO)
+// ============================================
+async function renderSinglePage(pageNum) {
     if (!state.pdfDoc || state.rendering) return;
 
-    // Cancela renderização anterior
     if (state.renderTask) {
-        try { state.renderTask.cancel(); } catch(e) {}
+        try { state.renderTask.cancel(); } catch (e) {}
     }
 
     state.rendering = true;
 
     try {
         const page = await state.pdfDoc.getPage(pageNum);
-        
-        // Calcula viewport com alta resolução (devicePixelRatio)
+
         const dpr = window.devicePixelRatio || 1;
         const containerWidth = els.pdfContainer.clientWidth - 32;
         const containerHeight = els.pdfContainer.clientHeight - 32;
-        
-        // Viewport base para calcular escala
+
         const baseViewport = page.getViewport({ scale: 1 });
-        
-        // Calcula escala para caber tanto na largura quanto na altura
+
         const scaleWidth = containerWidth / baseViewport.width;
         const scaleHeight = containerHeight / baseViewport.height;
         const scaleToFit = Math.min(scaleWidth, scaleHeight);
-        
+
         const finalScale = scaleToFit * state.scale;
         const viewport = page.getViewport({ scale: finalScale });
 
-        // Canvas com alta resolução
-        const canvas = els.pdfCanvas;
+        const wrapper = state.wrapperEls[0];
+        const canvas = wrapper ? wrapper.querySelector('canvas') : null;
+        if (!canvas) { state.rendering = false; return; }
+
         const context = canvas.getContext('2d', { alpha: false });
-        
+
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
         canvas.style.width = Math.floor(viewport.width) + 'px';
@@ -184,14 +390,12 @@ async function renderPage(pageNum) {
         const renderContext = {
             canvasContext: context,
             viewport: viewport,
-            intent: 'display',
-            enableWebGL: true
+            intent: 'display'
         };
 
         state.renderTask = page.render(renderContext);
         await state.renderTask.promise;
 
-        // Atualiza controles
         state.currentPage = pageNum;
         els.pdfPages.textContent = `Página ${pageNum} de ${state.totalPages}`;
         els.pageInput.value = pageNum;
@@ -205,6 +409,48 @@ async function renderPage(pageNum) {
         }
         state.rendering = false;
     }
+}
+
+// Ponto único chamado pelo resto do app (histórico de chamadas preservado);
+// decide se navega dentro do modo contínuo ou renderiza a página única
+async function renderPage(pageNum) {
+    if (!state.pdfDoc) return;
+    if (state.mode === 'continuous') {
+        goToPage(pageNum);
+        return;
+    }
+    await renderSinglePage(pageNum);
+}
+
+// ============================================
+// ALTERNAR MODO DE LEITURA (página única / contínuo)
+// ============================================
+function toggleReadingMode() {
+    state.mode = state.mode === 'single' ? 'continuous' : 'single';
+    localStorage.setItem('pdfReadMode', state.mode);
+    updateToggleModeButton();
+
+    if (!state.pdfDoc) return;
+
+    const targetPage = state.currentPage;
+    if (state.mode === 'continuous') {
+        buildContinuousMode();
+        requestAnimationFrame(() => goToPage(targetPage));
+    } else {
+        buildSingleMode();
+        renderSinglePage(targetPage);
+    }
+}
+
+function updateToggleModeButton() {
+    const isContinuous = state.mode === 'continuous';
+    els.btnToggleMode.classList.toggle('active', isContinuous);
+    els.btnToggleMode.innerHTML = isContinuous
+        ? '<i class="fas fa-file"></i>'
+        : '<i class="fas fa-scroll"></i>';
+    els.btnToggleMode.title = isContinuous
+        ? 'Modo página única'
+        : 'Modo contínuo (rolagem)';
 }
 
 // ============================================
@@ -224,25 +470,126 @@ function prevPage() {
 
 function goToPage(num) {
     const page = Math.max(1, Math.min(num, state.totalPages));
-    renderPage(page);
+
+    if (state.mode === 'continuous') {
+        const wrapper = state.wrapperEls[page - 1];
+        if (wrapper) wrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        state.currentPage = page;
+        els.pdfPages.textContent = `Página ${page} de ${state.totalPages}`;
+        els.pageInput.value = page;
+        els.btnPrev.disabled = page <= 1;
+        els.btnNext.disabled = page >= state.totalPages;
+    } else {
+        renderSinglePage(page);
+    }
 }
 
 // ============================================
 // ZOOM
 // ============================================
+
+// Aplica a mudança de escala no modo atual: no modo único, apenas
+// re-renderiza a página; no modo contínuo, recalcula o tamanho de todas
+// as páginas e força novo carregamento das que estão visíveis
+function applyZoomChange() {
+    if (!state.pdfDoc) return;
+    if (state.mode === 'continuous') {
+        rebuildContinuousSizes();
+    } else {
+        renderSinglePage(state.currentPage);
+    }
+}
+
 function zoomIn() {
     if (state.scale >= 4) return;
-    state.scale = Math.min(4, state.scale + 0.25);
+    state.scale = Math.min(4, +(state.scale + 0.25).toFixed(2));
     els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-    renderPage(state.currentPage);
+    applyZoomChange();
 }
 
 function zoomOut() {
     if (state.scale <= 0.25) return;
-    state.scale = Math.max(0.25, state.scale - 0.25);
+    state.scale = Math.max(0.25, +(state.scale - 0.25).toFixed(2));
     els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-    renderPage(state.currentPage);
+    applyZoomChange();
 }
+
+// Zoom por pinça (dois dedos) — dá feedback visual instantâneo com um
+// transform de CSS (barato) e só re-renderiza em alta resolução quando o
+// usuário solta os dedos, pra não pesar a CPU durante o gesto
+let pinch = { active: false, startDist: 0, startScale: 1, currentScale: null };
+
+function touchDist(touches) {
+    return Math.hypot(
+        touches[0].clientX - touches[1].clientX,
+        touches[0].clientY - touches[1].clientY
+    );
+}
+
+els.pdfContainer.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+        pinch.active = true;
+        pinch.startDist = touchDist(e.touches);
+        pinch.startScale = state.scale;
+        pinch.currentScale = state.scale;
+
+        const rect = els.pdfContainer.getBoundingClientRect();
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        els.pagesList.style.transformOrigin = `${midX}px ${midY}px`;
+    }
+}, { passive: true });
+
+els.pdfContainer.addEventListener('touchmove', (e) => {
+    if (pinch.active && e.touches.length === 2) {
+        e.preventDefault();
+        const ratio = touchDist(e.touches) / pinch.startDist;
+        const newScale = Math.max(0.25, Math.min(4, pinch.startScale * ratio));
+        pinch.currentScale = newScale;
+
+        // Prévia instantânea via CSS transform (sem re-renderizar o PDF)
+        els.pagesList.style.transform = `scale(${newScale / pinch.startScale})`;
+        els.zoomLevel.textContent = Math.round(newScale * 100) + '%';
+    }
+}, { passive: false });
+
+function endPinch() {
+    if (!pinch.active) return;
+    pinch.active = false;
+    els.pagesList.style.transform = '';
+    if (pinch.currentScale) {
+        state.scale = +pinch.currentScale.toFixed(2);
+        applyZoomChange();
+    }
+}
+
+els.pdfContainer.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) endPinch();
+});
+els.pdfContainer.addEventListener('touchcancel', endPinch);
+
+// Zoom com Ctrl + roda do mouse / pinça no trackpad (desktop)
+let wheelZoomTimer = null;
+els.pdfContainer.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const delta = -e.deltaY * 0.01;
+    state.scale = Math.max(0.25, Math.min(4, +(state.scale + delta).toFixed(2)));
+    els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
+
+    clearTimeout(wheelZoomTimer);
+    wheelZoomTimer = setTimeout(applyZoomChange, 150);
+}, { passive: false });
+
+// Atualiza o indicador de página conforme o usuário rola no modo contínuo
+els.pdfContainer.addEventListener('scroll', () => {
+    if (state.mode !== 'continuous') return;
+    if (state.scrollRAF) return;
+    state.scrollRAF = requestAnimationFrame(() => {
+        updateCurrentPageFromScroll();
+        state.scrollRAF = null;
+    });
+});
 
 // ============================================
 // FULLSCREEN
@@ -510,6 +857,10 @@ els.btnZoomIn.addEventListener('click', zoomIn);
 els.btnZoomOut.addEventListener('click', zoomOut);
 els.btnFullscreen.addEventListener('click', toggleFullscreen);
 
+// Modo de leitura (página única / rolagem contínua)
+els.btnToggleMode.addEventListener('click', toggleReadingMode);
+updateToggleModeButton();
+
 // Scan QR
 els.btnScan.addEventListener('click', openScannerModal);
 els.btnScanPage.addEventListener('click', openScannerModal);
@@ -523,6 +874,7 @@ els.btnOpen.addEventListener('click', () => els.fileInput.click());
 els.btnBack.addEventListener('click', () => {
     els.viewer.hidden = true;
     els.welcomeScreen.hidden = false;
+    clearPagesList();
     if (state.pdfDoc) {
         state.pdfDoc.destroy();
         state.pdfDoc = null;
@@ -609,8 +961,11 @@ let resizeTimeout;
 window.addEventListener('resize', () => {
     clearTimeout(resizeTimeout);
     resizeTimeout = setTimeout(() => {
-        if (state.pdfDoc && !els.viewer.hidden) {
-            renderPage(state.currentPage);
+        if (!state.pdfDoc || els.viewer.hidden) return;
+        if (state.mode === 'continuous') {
+            rebuildContinuousSizes();
+        } else {
+            renderSinglePage(state.currentPage);
         }
     }, 300);
 });

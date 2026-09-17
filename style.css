@@ -121,6 +121,11 @@ body {
     transform: scale(0.95);
 }
 
+.btn-icon.active {
+    background: rgba(231, 76, 60, 0.15);
+    color: var(--accent);
+}
+
 /* ============================================
    TELA INICIAL
    ============================================ */
@@ -347,10 +352,36 @@ body {
     -webkit-overflow-scrolling: touch;
     min-height: 0;
     width: 100%;
+    /* Deixa o navegador tratar o pan (arrastar/rolar) mas não o pinch nativo,
+       que é tratado à mão no JS para dar zoom real na página */
+    touch-action: pan-x pan-y;
 }
 
-#pdfCanvas {
-    max-width: 100%;
+.pages-list {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    transform-origin: 50% 50%;
+}
+
+/* Espaçamento entre páginas só existe no modo de rolagem contínua */
+.pages-list.continuous {
+    gap: 20px;
+}
+
+.page-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.page-wrapper canvas {
+    /* SEM max-width:100% aqui — isso travava o zoom, pois o navegador
+       nunca deixava o canvas ficar maior que o container mesmo quando
+       o JS calculava uma escala maior */
     height: auto;
     box-shadow: var(--shadow);
     border-radius: 4px;

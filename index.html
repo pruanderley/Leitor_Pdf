@@ -111,6 +111,9 @@
                     <button class="btn-icon" id="btnZoomIn" title="Aumentar zoom">
                         <i class="fas fa-search-plus"></i>
                     </button>
+                    <button class="btn-icon" id="btnToggleMode" title="Modo contínuo (rolagem)">
+                        <i class="fas fa-scroll"></i>
+                    </button>
                     <button class="btn-icon" id="btnScanPage" title="Escanear QR da página">
                         <i class="fas fa-qrcode"></i>
                     </button>
@@ -121,7 +124,7 @@
             </div>
 
             <div class="pdf-container" id="pdfContainer">
-                <canvas id="pdfCanvas"></canvas>
+                <div class="pages-list" id="pagesList"></div>
             </div>
 
             <!-- Navegação inferior -->
