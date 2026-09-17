@@ -78,8 +78,15 @@ function showToast(message, type = 'info', duration = 3000) {
 }
 
 // ============================================
-// VERIFICAR SE É PDF
+// HELPERS
 // ============================================
+// Aguarda o navegador calcular o layout (2 frames)
+function nextFrame() {
+    return new Promise(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+}
+
 function isPDF(file) {
     if (!file) return false;
     const byType = file.type === 'application/pdf';
@@ -122,8 +129,13 @@ async function loadPDF(file) {
         els.pageInput.max = pdf.numPages;
         els.zoomLevel.textContent = '100%';
 
+        // Mostra viewer e esconde welcome
         els.welcomeScreen.hidden = true;
         els.viewer.hidden = false;
+
+        // ⚠️ IMPORTANTE: aguarda o navegador calcular o layout
+        // antes de medir o container, senão clientHeight = 0
+        await nextFrame();
 
         await renderPage(1);
 
@@ -138,7 +150,8 @@ async function loadPDF(file) {
 // RENDERIZAÇÃO DE PÁGINA (ALTA RESOLUÇÃO)
 // ============================================
 async function renderPage(pageNum) {
-    if (!state.pdfDoc || state.rendering) return;
+    if (!state.pdfDoc) return;
+    if (state.rendering) return;
 
     if (state.renderTask) {
         try { state.renderTask.cancel(); } catch(e) {}
@@ -150,17 +163,43 @@ async function renderPage(pageNum) {
         const page = await state.pdfDoc.getPage(pageNum);
         
         const dpr = window.devicePixelRatio || 1;
-        const containerWidth = els.pdfContainer.clientWidth - 32;
-        const containerHeight = els.pdfContainer.clientHeight - 32;
+        
+        // Mede o container — com fallback caso ainda esteja com 0
+        let containerWidth = els.pdfContainer.clientWidth;
+        let containerHeight = els.pdfContainer.clientHeight;
+        
+        console.log('📐 Container:', containerWidth, 'x', containerHeight);
+        
+        // Fallback: se o container estiver zerado, usa a janela
+        if (!containerWidth || containerWidth < 50) {
+            containerWidth = window.innerWidth;
+            console.warn('⚠️ Largura do container = 0, usando window.innerWidth:', containerWidth);
+        }
+        if (!containerHeight || containerHeight < 50) {
+            containerHeight = window.innerHeight - 200;
+            console.warn('⚠️ Altura do container = 0, usando fallback:', containerHeight);
+        }
+        
+        // Espaço interno (padding do container)
+        const innerWidth = containerWidth - 32;
+        const innerHeight = containerHeight - 32;
         
         const baseViewport = page.getViewport({ scale: 1 });
         
-        const scaleWidth = containerWidth / baseViewport.width;
-        const scaleHeight = containerHeight / baseViewport.height;
-        const scaleToFit = Math.min(scaleWidth, scaleHeight);
+        const scaleWidth = innerWidth / baseViewport.width;
+        const scaleHeight = innerHeight / baseViewport.height;
+        let scaleToFit = Math.min(scaleWidth, scaleHeight);
+        
+        // Segurança: escala mínima
+        if (!isFinite(scaleToFit) || scaleToFit <= 0) {
+            console.warn('⚠️ Escala inválida, usando 1.0');
+            scaleToFit = 1.0;
+        }
         
         const finalScale = scaleToFit * state.scale;
         const viewport = page.getViewport({ scale: finalScale });
+
+        console.log('📐 Canvas:', Math.floor(viewport.width), 'x', Math.floor(viewport.height), '| escala:', finalScale.toFixed(3));
 
         const canvas = els.pdfCanvas;
         const context = canvas.getContext('2d', { alpha: false });
@@ -171,6 +210,8 @@ async function renderPage(pageNum) {
         canvas.style.height = Math.floor(viewport.height) + 'px';
 
         context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, viewport.width, viewport.height);
 
         const renderContext = {
             canvasContext: context,
@@ -182,16 +223,20 @@ async function renderPage(pageNum) {
         state.renderTask = page.render(renderContext);
         await state.renderTask.promise;
 
+        // Atualiza controles
         state.currentPage = pageNum;
         els.pdfPages.textContent = `Página ${pageNum} de ${state.totalPages}`;
         els.pageInput.value = pageNum;
         els.btnPrev.disabled = pageNum <= 1;
         els.btnNext.disabled = pageNum >= state.totalPages;
 
+        console.log('✅ Página', pageNum, 'renderizada');
+
         state.rendering = false;
     } catch (error) {
         if (error.name !== 'RenderingCancelledException') {
             console.error('Erro ao renderizar:', error);
+            showToast('❌ Erro ao renderizar página', 'error');
         }
         state.rendering = false;
     }
@@ -605,7 +650,7 @@ window.addEventListener('resize', () => {
 });
 
 // ============================================
-// SERVICE WORKER (CORRIGIDO PARA GITHUB PAGES)
+// SERVICE WORKER
 // ============================================
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
@@ -626,6 +671,6 @@ document.addEventListener('gesturestart', (e) => e.preventDefault());
 // ============================================
 // INICIALIZAÇÃO
 // ============================================
-console.log('📄 Leitor de PDF v1.0');
+console.log('📄 Leitor de PDF v1.1');
 console.log('👨‍💻 Desenvolvedor: Pr Uanderley');
 console.log('✨ Recursos: Alta resolução, QR Code, Histórico, PWA');

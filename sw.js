@@ -1,7 +1,7 @@
 // ============================================
 // SERVICE WORKER - LEITOR DE PDF PWA
 // ============================================
-const CACHE_NAME = 'leitor-pdf-v5';
+const CACHE_NAME = 'leitor-pdf-v6';
 const urlsToCache = [
     './',
     './index.html',
@@ -16,22 +16,17 @@ const urlsToCache = [
     'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js'
 ];
 
-// Instalação
 self.addEventListener('install', event => {
     console.log('🔧 Service Worker: instalando...');
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then(cache => {
-                console.log('📦 Cache aberto');
-                return cache.addAll(urlsToCache).catch(err => {
-                    console.warn('⚠️ Alguns arquivos não puderam ser cacheados:', err);
-                });
-            })
+            .then(cache => cache.addAll(urlsToCache).catch(err => {
+                console.warn('⚠️ Alguns arquivos não puderam ser cacheados:', err);
+            }))
     );
     self.skipWaiting();
 });
 
-// Ativação
 self.addEventListener('activate', event => {
     console.log('✅ Service Worker: ativado');
     event.waitUntil(
@@ -49,28 +44,23 @@ self.addEventListener('activate', event => {
     self.clients.claim();
 });
 
-// Interceptar requisições
 self.addEventListener('fetch', event => {
     if (event.request.method !== 'GET') return;
     if (event.request.url.startsWith('chrome-extension://')) return;
 
     event.respondWith(
         caches.match(event.request).then(cachedResponse => {
-            if (cachedResponse) {
-                return cachedResponse;
-            }
+            if (cachedResponse) return cachedResponse;
 
             return fetch(event.request)
                 .then(networkResponse => {
                     if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === 'opaque') {
                         return networkResponse;
                     }
-
                     const responseToCache = networkResponse.clone();
                     caches.open(CACHE_NAME).then(cache => {
                         cache.put(event.request, responseToCache);
                     });
-
                     return networkResponse;
                 })
                 .catch(() => {
