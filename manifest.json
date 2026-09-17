@@ -1,25 +1,40 @@
 {
-    "name": "PDF Reader Pro",
-    "short_name": "PDF Reader",
-    "description": "Leitor de PDF com alta resolução e scanner de QR Code",
-    "start_url": ".",
-    "scope": ".",
+    "name": "Leitor de PDF",
+    "short_name": "Leitor PDF",
+    "description": "Leitor de PDF grátis com alta resolução e leitor de QR Code. Desenvolvedor: Pr Uanderley",
+    "start_url": "./",
+    "scope": "./",
     "display": "standalone",
+    "orientation": "any",
     "background_color": "#0f0f23",
     "theme_color": "#0f0f23",
-    "orientation": "any",
+    "lang": "pt-BR",
+    "dir": "ltr",
+    "categories": ["productivity", "utilities"],
     "icons": [
         {
-            "src": "icon-192.png",
+            "src": "./icon-192-1.png",
             "sizes": "192x192",
             "type": "image/png",
-            "purpose": "any maskable"
+            "purpose": "any"
         },
         {
-            "src": "icon-512.png",
+            "src": "./icon-192-1.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "maskable"
+        },
+        {
+            "src": "./icon-512-1.png",
             "sizes": "512x512",
             "type": "image/png",
-            "purpose": "any maskable"
+            "purpose": "any"
+        },
+        {
+            "src": "./icon-512-1.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
         }
     ]
 }
