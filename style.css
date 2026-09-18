@@ -352,19 +352,23 @@ body {
     -webkit-overflow-scrolling: touch;
     min-height: 0;
     width: 100%;
-    /* touch-action padrão (auto): deixa o navegador tratar pan E pinch-zoom
-       nativamente aqui — é o gesto nativo do celular, funciona em qualquer
-       aparelho, ao contrário de reimplementar pinça na mão em JS */
+    /* touch-action: none -> desabilita pan E pinch nativos do navegador
+       para implementarmos os dois manualmente via JS (pinch-to-zoom real
+       que muda o tamanho do canvas, não só o zoom da página) */
+    touch-action: none;
+    overscroll-behavior: contain;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
-/* A UI (cabeçalho, barra de ferramentas, rodapé, menu, modais) nunca deve
-   dar zoom com o pinça — só a área do PDF. "manipulation" permite toque e
-   arraste normalmente, mas bloqueia pinch-zoom e double-tap-zoom nelas */
+/* A UI (cabeçalho, barra de ferramentas, rodapé, menu, modais) continua
+   com comportamento normal de toque — só a área do PDF tem o touch custom */
 .app-header,
 .viewer-toolbar,
 .viewer-footer,
 .sidebar,
-.modal-content {
+.modal-content,
+.toast {
     touch-action: manipulation;
 }
 
@@ -398,6 +402,11 @@ body {
     border-radius: 4px;
     background: white;
     display: block;
+    /* Eventos de toque passam direto para o .pdf-container */
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
 }
 
 .viewer-footer {

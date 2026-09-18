@@ -127,22 +127,17 @@ async function loadPDF(file) {
         state.currentPage = 1;
         state.scale = 1.0;
 
-        // Adiciona ao histórico
         addToHistory(file.name);
 
-        // Atualiza UI
         els.pdfName.textContent = file.name;
         els.totalPages.textContent = pdf.numPages;
         els.pageInput.value = 1;
         els.pageInput.max = pdf.numPages;
         els.zoomLevel.textContent = '100%';
 
-        // Mostra viewer e esconde welcome
         els.welcomeScreen.hidden = true;
         els.viewer.hidden = false;
 
-        // Guarda as dimensões da página 1 (assume páginas uniformes) para
-        // calcular o layout do modo contínuo sem precisar abrir todas as páginas
         await computeBaseAspect();
 
         if (state.mode === 'continuous') {
@@ -163,10 +158,6 @@ async function loadPDF(file) {
 // ============================================
 // LAYOUT: MODO PÁGINA ÚNICA vs MODO CONTÍNUO
 // ============================================
-
-// Pega as dimensões da página 1 em escala 1. É usado como referência para
-// estimar a altura de TODAS as páginas no modo contínuo (assume documento
-// com páginas de tamanho uniforme, o caso comum: livros, contratos, apostilas).
 async function computeBaseAspect() {
     const page = await state.pdfDoc.getPage(1);
     const vp = page.getViewport({ scale: 1 });
@@ -206,7 +197,6 @@ function buildContinuousMode() {
         const wrapper = document.createElement('div');
         wrapper.className = 'page-wrapper';
         wrapper.dataset.pageNum = i;
-        // Reserva o espaço da página antes de renderizar, pra rolagem não pular
         wrapper.style.width = Math.floor(estWidth) + 'px';
         wrapper.style.height = Math.floor(estHeight) + 'px';
         els.pagesList.appendChild(wrapper);
@@ -216,8 +206,6 @@ function buildContinuousMode() {
     setupContinuousObserver();
 }
 
-// Recalcula o tamanho estimado de cada página quando o zoom muda ou a tela
-// é redimensionada, e força a re-renderização das páginas visíveis
 function rebuildContinuousSizes() {
     const containerWidth = els.pdfContainer.clientWidth - 32;
     const aspect = state.pageAspect;
@@ -232,7 +220,6 @@ function rebuildContinuousSizes() {
     });
     state.renderedSet.clear();
 
-    // Re-observar força o IntersectionObserver a reavaliar o que está visível
     if (state.observer) {
         state.wrapperEls.forEach(w => state.observer.unobserve(w));
         state.wrapperEls.forEach(w => state.observer.observe(w));
@@ -253,7 +240,6 @@ function setupContinuousObserver() {
         });
     }, {
         root: els.pdfContainer,
-        // Pré-carrega ~800px antes/depois da área visível, pra rolar sem esperar
         rootMargin: '800px 0px',
         threshold: 0.01
     });
@@ -261,7 +247,6 @@ function setupContinuousObserver() {
     state.wrapperEls.forEach(w => state.observer.observe(w));
 }
 
-// Renderiza uma página dentro do modo contínuo (alta resolução, igual ao modo único)
 async function renderContinuousPage(pageNum) {
     if (state.renderedSet.has(pageNum)) return;
     state.renderedSet.add(pageNum);
@@ -291,7 +276,6 @@ async function renderContinuousPage(pageNum) {
         canvas.style.height = Math.floor(viewport.height) + 'px';
         context.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-        // Ajusta o wrapper para o tamanho real (a estimativa pode ter um leve erro)
         wrapper.style.width = Math.floor(viewport.width) + 'px';
         wrapper.style.height = Math.floor(viewport.height) + 'px';
 
@@ -308,8 +292,6 @@ async function renderContinuousPage(pageNum) {
     }
 }
 
-// Libera o canvas de páginas que saíram da área pré-carregada, pra economizar
-// memória e CPU — essencial num notebook sem GPU dedicada
 function unrenderContinuousPage(pageNum, wrapper) {
     if (!state.renderedSet.has(pageNum)) return;
     state.renderedSet.delete(pageNum);
@@ -317,8 +299,6 @@ function unrenderContinuousPage(pageNum, wrapper) {
     if (canvas) canvas.remove();
 }
 
-// Atualiza o indicador de página com base em qual página está mais perto
-// do centro da área visível durante a rolagem contínua
 function updateCurrentPageFromScroll() {
     if (state.mode !== 'continuous' || state.wrapperEls.length === 0) return;
 
@@ -347,7 +327,7 @@ function updateCurrentPageFromScroll() {
 }
 
 // ============================================
-// RENDERIZAÇÃO DE PÁGINA — MODO PÁGINA ÚNICA (ALTA RESOLUÇÃO)
+// RENDERIZAÇÃO DE PÁGINA — MODO PÁGINA ÚNICA
 // ============================================
 async function renderSinglePage(pageNum) {
     if (!state.pdfDoc || state.rendering) return;
@@ -411,8 +391,6 @@ async function renderSinglePage(pageNum) {
     }
 }
 
-// Ponto único chamado pelo resto do app (histórico de chamadas preservado);
-// decide se navega dentro do modo contínuo ou renderiza a página única
 async function renderPage(pageNum) {
     if (!state.pdfDoc) return;
     if (state.mode === 'continuous') {
@@ -423,7 +401,7 @@ async function renderPage(pageNum) {
 }
 
 // ============================================
-// ALTERNAR MODO DE LEITURA (página única / contínuo)
+// ALTERNAR MODO DE LEITURA
 // ============================================
 function toggleReadingMode() {
     state.mode = state.mode === 'single' ? 'continuous' : 'single';
@@ -485,12 +463,15 @@ function goToPage(num) {
 }
 
 // ============================================
-// ZOOM
+// ZOOM — botões, Ctrl+roda, e PINCH-TO-ZOOM
 // ============================================
 
-// Aplica a mudança de escala no modo atual: no modo único, apenas
-// re-renderiza a página; no modo contínuo, recalcula o tamanho de todas
-// as páginas e força novo carregamento das que estão visíveis
+function setScale(newScale, { applyImmediately = true } = {}) {
+    state.scale = Math.max(0.25, Math.min(4, +newScale.toFixed(2)));
+    els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
+    if (applyImmediately) applyZoomChange();
+}
+
 function applyZoomChange() {
     if (!state.pdfDoc) return;
     if (state.mode === 'continuous') {
@@ -502,23 +483,15 @@ function applyZoomChange() {
 
 function zoomIn() {
     if (state.scale >= 4) return;
-    state.scale = Math.min(4, +(state.scale + 0.25).toFixed(2));
-    els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-    applyZoomChange();
+    setScale(state.scale + 0.25);
 }
 
 function zoomOut() {
     if (state.scale <= 0.25) return;
-    state.scale = Math.max(0.25, +(state.scale - 0.25).toFixed(2));
-    els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-    applyZoomChange();
+    setScale(state.scale - 0.25);
 }
 
-// O zoom por pinça (dois dedos) agora é tratado nativamente pelo navegador
-// (touch-action no CSS libera isso só dentro da área do PDF) — mais
-// confiável entre aparelhos do que reimplementar a detecção do gesto em JS.
-
-// Zoom com Ctrl + roda do mouse / pinça no trackpad (desktop)
+// ---- Ctrl + roda do mouse / pinça de trackpad (desktop) ----
 let wheelZoomTimer = null;
 els.pdfContainer.addEventListener('wheel', (e) => {
     if (!e.ctrlKey) return;
@@ -531,7 +504,130 @@ els.pdfContainer.addEventListener('wheel', (e) => {
     wheelZoomTimer = setTimeout(applyZoomChange, 150);
 }, { passive: false });
 
-// Atualiza o indicador de página conforme o usuário rola no modo contínuo
+// ============================================
+// 👆 GESTOS DE TOQUE — PINCH, PAN e DOUBLE-TAP
+// ============================================
+// Implementado manualmente porque o navegador não faz "pinch-to-zoom" no
+// conteúdo da página quando há overflow:hidden no body — ele só daria zoom
+// no viewport inteiro. Aqui a pinça REDIMENSIONA o canvas, o que é o
+// comportamento real de um leitor de PDF.
+
+const touchState = {
+    mode: null,            // 'pan' | 'pinch' | null
+    startX: 0,
+    startY: 0,
+    scrollLeft: 0,
+    scrollTop: 0,
+    startDistance: 0,
+    startScale: 1,
+    pendingScale: 1,
+    lastTap: 0,
+    moved: false,
+    pinching: false
+};
+
+function getTouchDistance(t1, t2) {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.hypot(dx, dy);
+}
+
+els.pdfContainer.addEventListener('touchstart', (e) => {
+    // ====== DOIS DEDOS: PINCH ======
+    if (e.touches.length === 2) {
+        e.preventDefault();
+        touchState.mode = 'pinch';
+        touchState.pinching = false;
+        touchState.startDistance = getTouchDistance(e.touches[0], e.touches[1]);
+        touchState.startScale = state.scale;
+        touchState.pendingScale = state.scale;
+        return;
+    }
+
+    // ====== UM DEDO: PAN ou DOUBLE-TAP ======
+    if (e.touches.length === 1) {
+        touchState.mode = 'pan';
+        touchState.moved = false;
+        touchState.startX = e.touches[0].clientX;
+        touchState.startY = e.touches[0].clientY;
+        touchState.scrollLeft = els.pdfContainer.scrollLeft;
+        touchState.scrollTop = els.pdfContainer.scrollTop;
+
+        // Detecta double-tap: alterna entre 100% e 200%
+        const now = Date.now();
+        if (now - touchState.lastTap < 300) {
+            e.preventDefault();
+            const newScale = state.scale > 1.05 ? 1.0 : 2.0;
+            setScale(newScale);
+            touchState.lastTap = 0;
+            touchState.mode = null;
+            return;
+        }
+        touchState.lastTap = now;
+    }
+}, { passive: false });
+
+els.pdfContainer.addEventListener('touchmove', (e) => {
+    // ====== PINCH (dois dedos) ======
+    if (touchState.mode === 'pinch' && e.touches.length === 2) {
+        e.preventDefault();
+        const distance = getTouchDistance(e.touches[0], e.touches[1]);
+        const ratio = distance / touchState.startDistance;
+        let newScale = touchState.startScale * ratio;
+        newScale = Math.max(0.25, Math.min(4, newScale));
+
+        touchState.pendingScale = newScale;
+        touchState.pinching = true;
+        touchState.moved = true;
+
+        // Atualiza a % em tempo real (só o texto, não re-renderiza ainda)
+        els.zoomLevel.textContent = Math.round(newScale * 100) + '%';
+        return;
+    }
+
+    // ====== PAN (um dedo) ======
+    if (touchState.mode === 'pan' && e.touches.length === 1) {
+        const dx = e.touches[0].clientX - touchState.startX;
+        const dy = e.touches[0].clientY - touchState.startY;
+
+        // Só começa a arrastar se realmente moveu > 3px (evita bloquear taps)
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            e.preventDefault();
+            touchState.moved = true;
+            els.pdfContainer.scrollLeft = touchState.scrollLeft - dx;
+            els.pdfContainer.scrollTop = touchState.scrollTop - dy;
+        }
+    }
+}, { passive: false });
+
+els.pdfContainer.addEventListener('touchend', (e) => {
+    // ====== FIM DO PINCH: aplica a nova escala ======
+    if (touchState.mode === 'pinch') {
+        if (touchState.pinching && Math.abs(touchState.pendingScale - state.scale) > 0.03) {
+            setScale(touchState.pendingScale);
+        }
+        touchState.pinching = false;
+    }
+
+    // Se ainda há 1 dedo na tela (passou de 2 → 1), reinicia como pan
+    if (e.touches.length === 1) {
+        touchState.mode = 'pan';
+        touchState.moved = false;
+        touchState.startX = e.touches[0].clientX;
+        touchState.startY = e.touches[0].clientY;
+        touchState.scrollLeft = els.pdfContainer.scrollLeft;
+        touchState.scrollTop = els.pdfContainer.scrollTop;
+    } else if (e.touches.length === 0) {
+        touchState.mode = null;
+    }
+}, { passive: true });
+
+els.pdfContainer.addEventListener('touchcancel', () => {
+    touchState.mode = null;
+    touchState.pinching = false;
+});
+
+// Atualiza o indicador de página conforme rola no modo contínuo
 els.pdfContainer.addEventListener('scroll', () => {
     if (state.mode !== 'continuous') return;
     if (state.scrollRAF) return;
@@ -618,7 +714,6 @@ async function scanPageForQR(pageNum) {
     try {
         const page = await state.pdfDoc.getPage(pageNum);
         
-        // Renderiza em alta resolução para o scan
         const viewport = page.getViewport({ scale: 3.0 });
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
@@ -802,12 +897,12 @@ els.btnNext.addEventListener('click', nextPage);
 els.btnPrev.addEventListener('click', prevPage);
 els.pageInput.addEventListener('change', (e) => goToPage(parseInt(e.target.value)));
 
-// Zoom
+// Zoom (botões)
 els.btnZoomIn.addEventListener('click', zoomIn);
 els.btnZoomOut.addEventListener('click', zoomOut);
 els.btnFullscreen.addEventListener('click', toggleFullscreen);
 
-// Modo de leitura (página única / rolagem contínua)
+// Modo de leitura
 els.btnToggleMode.addEventListener('click', toggleReadingMode);
 updateToggleModeButton();
 
@@ -931,11 +1026,15 @@ if ('serviceWorker' in navigator) {
     });
 }
 
-// Prevenir zoom com gestos
+// Prevenir zoom com gestos do iOS Safari (pinça do viewport).
+// O pinch do conteúdo do PDF é tratado em JS (touchstart/touchmove/touchend)
 document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('gesturechange', (e) => e.preventDefault());
+document.addEventListener('gestureend', (e) => e.preventDefault());
 
 // ============================================
 // INICIALIZAÇÃO
 // ============================================
-console.log('📄 PDF Reader Pro v1.0');
-console.log('✨ Recursos: Alta resolução, QR Code, Histórico');
+console.log('📄 PDF Reader Pro v1.1');
+console.log('👨‍💻 Desenvolvedor: Pr Uanderley');
+console.log('✨ Recursos: Pinch-to-zoom, pan, double-tap, QR Code, PWA');
