@@ -514,74 +514,9 @@ function zoomOut() {
     applyZoomChange();
 }
 
-// Zoom por pinça (dois dedos) — implementado com Pointer Events, que
-// rastreiam cada dedo individualmente por pointerId. É mais confiável que
-// Touch Events puro, que em vários navegadores Android tem comportamento
-// inconsistente ao detectar o segundo dedo na mesma sequência de gesto.
-// Dá feedback visual instantâneo com um transform de CSS (barato) e só
-// re-renderiza em alta resolução quando o usuário solta os dedos.
-const activePointers = new Map(); // pointerId -> {x, y}
-let pinch = { active: false, startDist: 0, startScale: 1, currentScale: null };
-
-function pointersDist() {
-    const pts = [...activePointers.values()];
-    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-}
-
-els.pdfContainer.addEventListener('pointerdown', (e) => {
-    // Só nos interessam dedos/ponteiros do tipo touch para o gesto de pinça
-    if (e.pointerType !== 'touch') return;
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-    if (activePointers.size === 2) {
-        pinch.active = true;
-        pinch.startDist = pointersDist();
-        pinch.startScale = state.scale;
-        pinch.currentScale = state.scale;
-
-        const pts = [...activePointers.values()];
-        const rect = els.pdfContainer.getBoundingClientRect();
-        const midX = (pts[0].x + pts[1].x) / 2 - rect.left;
-        const midY = (pts[0].y + pts[1].y) / 2 - rect.top;
-        els.pagesList.style.transformOrigin = `${midX}px ${midY}px`;
-    }
-});
-
-els.pdfContainer.addEventListener('pointermove', (e) => {
-    if (e.pointerType !== 'touch' || !activePointers.has(e.pointerId)) return;
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-    if (pinch.active && activePointers.size === 2) {
-        e.preventDefault();
-        const ratio = pointersDist() / pinch.startDist;
-        const newScale = Math.max(0.25, Math.min(4, pinch.startScale * ratio));
-        pinch.currentScale = newScale;
-
-        // Prévia instantânea via CSS transform (sem re-renderizar o PDF)
-        els.pagesList.style.transform = `scale(${newScale / pinch.startScale})`;
-        els.zoomLevel.textContent = Math.round(newScale * 100) + '%';
-    }
-});
-
-function endPinch() {
-    if (!pinch.active) return;
-    pinch.active = false;
-    els.pagesList.style.transform = '';
-    if (pinch.currentScale) {
-        state.scale = +pinch.currentScale.toFixed(2);
-        applyZoomChange();
-    }
-}
-
-function releasePointer(e) {
-    if (e.pointerType !== 'touch') return;
-    activePointers.delete(e.pointerId);
-    if (activePointers.size < 2) endPinch();
-}
-
-els.pdfContainer.addEventListener('pointerup', releasePointer);
-els.pdfContainer.addEventListener('pointercancel', releasePointer);
-els.pdfContainer.addEventListener('pointerleave', releasePointer);
+// O zoom por pinça (dois dedos) agora é tratado nativamente pelo navegador
+// (touch-action no CSS libera isso só dentro da área do PDF) — mais
+// confiável entre aparelhos do que reimplementar a detecção do gesto em JS.
 
 // Zoom com Ctrl + roda do mouse / pinça no trackpad (desktop)
 let wheelZoomTimer = null;
