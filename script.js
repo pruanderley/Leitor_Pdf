@@ -1,5 +1,5 @@
 // ============================================
-// LEITOR DE PDF - SCRIPT PRINCIPAL
+// PDF READER PRO - SCRIPT PRINCIPAL
 // ============================================
 
 // Configuração do PDF.js
@@ -18,7 +18,19 @@ const state = {
     rendering: false,
     renderTask: null,
     html5QrCode: null,
-    history: JSON.parse(localStorage.getItem('pdfHistory') || '[]')
+    history: JSON.parse(localStorage.getItem('pdfHistory') || '[]'),
+
+    // Modo de leitura: 'single' (página única) ou 'continuous' (rolagem contínua)
+    mode: localStorage.getItem('pdfReadMode') || 'single',
+    // Dimensões da página 1 em escala 1, usadas para estimar o tamanho de todas
+    // as páginas no modo contínuo antes de renderizá-las (assume páginas uniformes)
+    pageAspect: null,
+    // Um <div class="page-wrapper"> por página, indexado por (pageNum - 1)
+    wrapperEls: [],
+    // Páginas atualmente com canvas renderizado (modo contínuo)
+    renderedSet: new Set(),
+    observer: null,
+    scrollRAF: null
 };
 
 // ============================================
@@ -31,8 +43,9 @@ const els = {
     viewer: $('viewer'),
     dropZone: $('dropZone'),
     fileInput: $('fileInput'),
-    pdfCanvas: $('pdfCanvas'),
     pdfContainer: $('pdfContainer'),
+    pagesList: $('pagesList'),
+    btnToggleMode: $('btnToggleMode'),
     pdfName: $('pdfName'),
     pdfPages: $('pdfPages'),
     totalPages: $('totalPages'),
@@ -78,14 +91,8 @@ function showToast(message, type = 'info', duration = 3000) {
 }
 
 // ============================================
-// HELPERS
+// VERIFICAR SE É PDF (por tipo OU extensão)
 // ============================================
-function nextFrame() {
-    return new Promise(resolve => {
-        requestAnimationFrame(() => requestAnimationFrame(resolve));
-    });
-}
-
 function isPDF(file) {
     if (!file) return false;
     const byType = file.type === 'application/pdf';
@@ -120,19 +127,31 @@ async function loadPDF(file) {
         state.currentPage = 1;
         state.scale = 1.0;
 
+        // Adiciona ao histórico
         addToHistory(file.name);
 
+        // Atualiza UI
         els.pdfName.textContent = file.name;
         els.totalPages.textContent = pdf.numPages;
         els.pageInput.value = 1;
         els.pageInput.max = pdf.numPages;
         els.zoomLevel.textContent = '100%';
 
+        // Mostra viewer e esconde welcome
         els.welcomeScreen.hidden = true;
         els.viewer.hidden = false;
 
-        await nextFrame();
-        await renderPage(1);
+        // Guarda as dimensões da página 1 (assume páginas uniformes) para
+        // calcular o layout do modo contínuo sem precisar abrir todas as páginas
+        await computeBaseAspect();
+
+        if (state.mode === 'continuous') {
+            buildContinuousMode();
+            requestAnimationFrame(() => renderContinuousPage(1));
+        } else {
+            buildSingleMode();
+            await renderSinglePage(1);
+        }
 
         showToast(`✅ PDF carregado: ${pdf.numPages} páginas`, 'success');
     } catch (error) {
@@ -142,66 +161,236 @@ async function loadPDF(file) {
 }
 
 // ============================================
-// RENDERIZAÇÃO DE PÁGINA (ALTA RESOLUÇÃO)
+// LAYOUT: MODO PÁGINA ÚNICA vs MODO CONTÍNUO
 // ============================================
-async function renderPage(pageNum) {
-    if (!state.pdfDoc) return;
-    if (state.rendering) return;
+
+// Pega as dimensões da página 1 em escala 1. É usado como referência para
+// estimar a altura de TODAS as páginas no modo contínuo (assume documento
+// com páginas de tamanho uniforme, o caso comum: livros, contratos, apostilas).
+async function computeBaseAspect() {
+    const page = await state.pdfDoc.getPage(1);
+    const vp = page.getViewport({ scale: 1 });
+    state.pageAspect = { width: vp.width, height: vp.height };
+}
+
+function clearPagesList() {
+    if (state.observer) {
+        state.observer.disconnect();
+        state.observer = null;
+    }
+    els.pagesList.innerHTML = '';
+    els.pagesList.classList.remove('continuous');
+    state.wrapperEls = [];
+    state.renderedSet.clear();
+}
+
+function buildSingleMode() {
+    clearPagesList();
+    const wrapper = document.createElement('div');
+    wrapper.className = 'page-wrapper';
+    wrapper.appendChild(document.createElement('canvas'));
+    els.pagesList.appendChild(wrapper);
+    state.wrapperEls[0] = wrapper;
+}
+
+function buildContinuousMode() {
+    clearPagesList();
+    els.pagesList.classList.add('continuous');
+
+    const containerWidth = els.pdfContainer.clientWidth - 32;
+    const aspect = state.pageAspect;
+    const estWidth = containerWidth * state.scale;
+    const estHeight = estWidth * (aspect.height / aspect.width);
+
+    for (let i = 1; i <= state.totalPages; i++) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'page-wrapper';
+        wrapper.dataset.pageNum = i;
+        // Reserva o espaço da página antes de renderizar, pra rolagem não pular
+        wrapper.style.width = Math.floor(estWidth) + 'px';
+        wrapper.style.height = Math.floor(estHeight) + 'px';
+        els.pagesList.appendChild(wrapper);
+        state.wrapperEls[i - 1] = wrapper;
+    }
+
+    setupContinuousObserver();
+}
+
+// Recalcula o tamanho estimado de cada página quando o zoom muda ou a tela
+// é redimensionada, e força a re-renderização das páginas visíveis
+function rebuildContinuousSizes() {
+    const containerWidth = els.pdfContainer.clientWidth - 32;
+    const aspect = state.pageAspect;
+    const estWidth = containerWidth * state.scale;
+    const estHeight = estWidth * (aspect.height / aspect.width);
+
+    state.wrapperEls.forEach((wrapper) => {
+        wrapper.style.width = Math.floor(estWidth) + 'px';
+        wrapper.style.height = Math.floor(estHeight) + 'px';
+        const canvas = wrapper.querySelector('canvas');
+        if (canvas) canvas.remove();
+    });
+    state.renderedSet.clear();
+
+    // Re-observar força o IntersectionObserver a reavaliar o que está visível
+    if (state.observer) {
+        state.wrapperEls.forEach(w => state.observer.unobserve(w));
+        state.wrapperEls.forEach(w => state.observer.observe(w));
+    }
+}
+
+function setupContinuousObserver() {
+    if (state.observer) state.observer.disconnect();
+
+    state.observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            const pageNum = parseInt(entry.target.dataset.pageNum, 10);
+            if (entry.isIntersecting) {
+                renderContinuousPage(pageNum);
+            } else {
+                unrenderContinuousPage(pageNum, entry.target);
+            }
+        });
+    }, {
+        root: els.pdfContainer,
+        // Pré-carrega ~800px antes/depois da área visível, pra rolar sem esperar
+        rootMargin: '800px 0px',
+        threshold: 0.01
+    });
+
+    state.wrapperEls.forEach(w => state.observer.observe(w));
+}
+
+// Renderiza uma página dentro do modo contínuo (alta resolução, igual ao modo único)
+async function renderContinuousPage(pageNum) {
+    if (state.renderedSet.has(pageNum)) return;
+    state.renderedSet.add(pageNum);
+
+    try {
+        const page = await state.pdfDoc.getPage(pageNum);
+        const wrapper = state.wrapperEls[pageNum - 1];
+        if (!wrapper) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const containerWidth = els.pdfContainer.clientWidth - 32;
+        const baseViewport = page.getViewport({ scale: 1 });
+        const scaleToFit = containerWidth / baseViewport.width;
+        const finalScale = scaleToFit * state.scale;
+        const viewport = page.getViewport({ scale: finalScale });
+
+        let canvas = wrapper.querySelector('canvas');
+        if (!canvas) {
+            canvas = document.createElement('canvas');
+            wrapper.appendChild(canvas);
+        }
+        const context = canvas.getContext('2d', { alpha: false });
+
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = Math.floor(viewport.width) + 'px';
+        canvas.style.height = Math.floor(viewport.height) + 'px';
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        // Ajusta o wrapper para o tamanho real (a estimativa pode ter um leve erro)
+        wrapper.style.width = Math.floor(viewport.width) + 'px';
+        wrapper.style.height = Math.floor(viewport.height) + 'px';
+
+        await page.render({
+            canvasContext: context,
+            viewport: viewport,
+            intent: 'display'
+        }).promise;
+    } catch (error) {
+        if (error.name !== 'RenderingCancelledException') {
+            console.error(`Erro ao renderizar página ${pageNum}:`, error);
+        }
+        state.renderedSet.delete(pageNum);
+    }
+}
+
+// Libera o canvas de páginas que saíram da área pré-carregada, pra economizar
+// memória e CPU — essencial num notebook sem GPU dedicada
+function unrenderContinuousPage(pageNum, wrapper) {
+    if (!state.renderedSet.has(pageNum)) return;
+    state.renderedSet.delete(pageNum);
+    const canvas = wrapper.querySelector('canvas');
+    if (canvas) canvas.remove();
+}
+
+// Atualiza o indicador de página com base em qual página está mais perto
+// do centro da área visível durante a rolagem contínua
+function updateCurrentPageFromScroll() {
+    if (state.mode !== 'continuous' || state.wrapperEls.length === 0) return;
+
+    const containerRect = els.pdfContainer.getBoundingClientRect();
+    const centerY = containerRect.top + containerRect.height / 2;
+
+    let closestPage = state.currentPage;
+    let closestDist = Infinity;
+
+    state.wrapperEls.forEach((wrapper, idx) => {
+        const rect = wrapper.getBoundingClientRect();
+        const dist = Math.abs((rect.top + rect.height / 2) - centerY);
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestPage = idx + 1;
+        }
+    });
+
+    if (closestPage !== state.currentPage) {
+        state.currentPage = closestPage;
+        els.pdfPages.textContent = `Página ${closestPage} de ${state.totalPages}`;
+        els.pageInput.value = closestPage;
+        els.btnPrev.disabled = closestPage <= 1;
+        els.btnNext.disabled = closestPage >= state.totalPages;
+    }
+}
+
+// ============================================
+// RENDERIZAÇÃO DE PÁGINA — MODO PÁGINA ÚNICA (ALTA RESOLUÇÃO)
+// ============================================
+async function renderSinglePage(pageNum) {
+    if (!state.pdfDoc || state.rendering) return;
 
     if (state.renderTask) {
-        try { state.renderTask.cancel(); } catch(e) {}
+        try { state.renderTask.cancel(); } catch (e) {}
     }
 
     state.rendering = true;
 
     try {
         const page = await state.pdfDoc.getPage(pageNum);
-        
+
         const dpr = window.devicePixelRatio || 1;
-        
-        let containerWidth = els.pdfContainer.clientWidth;
-        let containerHeight = els.pdfContainer.clientHeight;
-        
-        if (!containerWidth || containerWidth < 50) {
-            containerWidth = window.innerWidth;
-        }
-        if (!containerHeight || containerHeight < 50) {
-            containerHeight = window.innerHeight - 200;
-        }
-        
-        const innerWidth = containerWidth - 32;
-        const innerHeight = containerHeight - 32;
-        
+        const containerWidth = els.pdfContainer.clientWidth - 32;
+        const containerHeight = els.pdfContainer.clientHeight - 32;
+
         const baseViewport = page.getViewport({ scale: 1 });
-        
-        const scaleWidth = innerWidth / baseViewport.width;
-        const scaleHeight = innerHeight / baseViewport.height;
-        let scaleToFit = Math.min(scaleWidth, scaleHeight);
-        
-        if (!isFinite(scaleToFit) || scaleToFit <= 0) {
-            scaleToFit = 1.0;
-        }
-        
+
+        const scaleWidth = containerWidth / baseViewport.width;
+        const scaleHeight = containerHeight / baseViewport.height;
+        const scaleToFit = Math.min(scaleWidth, scaleHeight);
+
         const finalScale = scaleToFit * state.scale;
         const viewport = page.getViewport({ scale: finalScale });
 
-        const canvas = els.pdfCanvas;
+        const wrapper = state.wrapperEls[0];
+        const canvas = wrapper ? wrapper.querySelector('canvas') : null;
+        if (!canvas) { state.rendering = false; return; }
+
         const context = canvas.getContext('2d', { alpha: false });
-        
+
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
         canvas.style.width = Math.floor(viewport.width) + 'px';
         canvas.style.height = Math.floor(viewport.height) + 'px';
 
         context.setTransform(dpr, 0, 0, dpr, 0, 0);
-        context.fillStyle = '#ffffff';
-        context.fillRect(0, 0, viewport.width, viewport.height);
 
         const renderContext = {
             canvasContext: context,
             viewport: viewport,
-            intent: 'display',
-            enableWebGL: true
+            intent: 'display'
         };
 
         state.renderTask = page.render(renderContext);
@@ -222,168 +411,199 @@ async function renderPage(pageNum) {
     }
 }
 
+// Ponto único chamado pelo resto do app (histórico de chamadas preservado);
+// decide se navega dentro do modo contínuo ou renderiza a página única
+async function renderPage(pageNum) {
+    if (!state.pdfDoc) return;
+    if (state.mode === 'continuous') {
+        goToPage(pageNum);
+        return;
+    }
+    await renderSinglePage(pageNum);
+}
+
+// ============================================
+// ALTERNAR MODO DE LEITURA (página única / contínuo)
+// ============================================
+function toggleReadingMode() {
+    state.mode = state.mode === 'single' ? 'continuous' : 'single';
+    localStorage.setItem('pdfReadMode', state.mode);
+    updateToggleModeButton();
+
+    if (!state.pdfDoc) return;
+
+    const targetPage = state.currentPage;
+    if (state.mode === 'continuous') {
+        buildContinuousMode();
+        requestAnimationFrame(() => goToPage(targetPage));
+    } else {
+        buildSingleMode();
+        renderSinglePage(targetPage);
+    }
+}
+
+function updateToggleModeButton() {
+    const isContinuous = state.mode === 'continuous';
+    els.btnToggleMode.classList.toggle('active', isContinuous);
+    els.btnToggleMode.innerHTML = isContinuous
+        ? '<i class="fas fa-file"></i>'
+        : '<i class="fas fa-scroll"></i>';
+    els.btnToggleMode.title = isContinuous
+        ? 'Modo página única'
+        : 'Modo contínuo (rolagem)';
+}
+
 // ============================================
 // NAVEGAÇÃO
 // ============================================
 function nextPage() {
     if (state.currentPage < state.totalPages) {
-        state.scale = 1.0;
-        els.zoomLevel.textContent = '100%';
         renderPage(state.currentPage + 1);
     }
 }
 
 function prevPage() {
     if (state.currentPage > 1) {
-        state.scale = 1.0;
-        els.zoomLevel.textContent = '100%';
         renderPage(state.currentPage - 1);
     }
 }
 
 function goToPage(num) {
     const page = Math.max(1, Math.min(num, state.totalPages));
-    state.scale = 1.0;
-    els.zoomLevel.textContent = '100%';
-    renderPage(page);
+
+    if (state.mode === 'continuous') {
+        const wrapper = state.wrapperEls[page - 1];
+        if (wrapper) wrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        state.currentPage = page;
+        els.pdfPages.textContent = `Página ${page} de ${state.totalPages}`;
+        els.pageInput.value = page;
+        els.btnPrev.disabled = page <= 1;
+        els.btnNext.disabled = page >= state.totalPages;
+    } else {
+        renderSinglePage(page);
+    }
 }
 
 // ============================================
-// ZOOM (botões)
+// ZOOM
 // ============================================
+
+// Aplica a mudança de escala no modo atual: no modo único, apenas
+// re-renderiza a página; no modo contínuo, recalcula o tamanho de todas
+// as páginas e força novo carregamento das que estão visíveis
+function applyZoomChange() {
+    if (!state.pdfDoc) return;
+    if (state.mode === 'continuous') {
+        rebuildContinuousSizes();
+    } else {
+        renderSinglePage(state.currentPage);
+    }
+}
+
 function zoomIn() {
     if (state.scale >= 4) return;
-    state.scale = Math.min(4, state.scale + 0.25);
+    state.scale = Math.min(4, +(state.scale + 0.25).toFixed(2));
     els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-    renderPage(state.currentPage);
+    applyZoomChange();
 }
 
 function zoomOut() {
     if (state.scale <= 0.25) return;
-    state.scale = Math.max(0.25, state.scale - 0.25);
+    state.scale = Math.max(0.25, +(state.scale - 0.25).toFixed(2));
     els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-    renderPage(state.currentPage);
+    applyZoomChange();
 }
 
-// ============================================
-// PINCH-TO-ZOOM (zoom com dois dedos) + PAN
-// ============================================
-const touch = {
-    mode: null,          // 'pan' | 'pinch' | null
-    startX: 0,
-    startY: 0,
-    startScrollLeft: 0,
-    startScrollTop: 0,
-    startDistance: 0,
-    startScale: 1,
-    pendingScale: 1,
-    lastTapTime: 0,
-    isZooming: false
-};
+// Zoom por pinça (dois dedos) — implementado com Pointer Events, que
+// rastreiam cada dedo individualmente por pointerId. É mais confiável que
+// Touch Events puro, que em vários navegadores Android tem comportamento
+// inconsistente ao detectar o segundo dedo na mesma sequência de gesto.
+// Dá feedback visual instantâneo com um transform de CSS (barato) e só
+// re-renderiza em alta resolução quando o usuário solta os dedos.
+const activePointers = new Map(); // pointerId -> {x, y}
+let pinch = { active: false, startDist: 0, startScale: 1, currentScale: null };
 
-function getDistance(t1, t2) {
-    const dx = t1.clientX - t2.clientX;
-    const dy = t1.clientY - t2.clientY;
-    return Math.hypot(dx, dy);
+function pointersDist() {
+    const pts = [...activePointers.values()];
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
 }
 
-els.pdfContainer.addEventListener('touchstart', (e) => {
-    // Dois dedos: PINCH
-    if (e.touches.length === 2) {
-        e.preventDefault();
-        touch.mode = 'pinch';
-        touch.startDistance = getDistance(e.touches[0], e.touches[1]);
-        touch.startScale = state.scale;
-        touch.pendingScale = state.scale;
-        touch.isZooming = false;
-        return;
+els.pdfContainer.addEventListener('pointerdown', (e) => {
+    // Só nos interessam dedos/ponteiros do tipo touch para o gesto de pinça
+    if (e.pointerType !== 'touch') return;
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointers.size === 2) {
+        pinch.active = true;
+        pinch.startDist = pointersDist();
+        pinch.startScale = state.scale;
+        pinch.currentScale = state.scale;
+
+        const pts = [...activePointers.values()];
+        const rect = els.pdfContainer.getBoundingClientRect();
+        const midX = (pts[0].x + pts[1].x) / 2 - rect.left;
+        const midY = (pts[0].y + pts[1].y) / 2 - rect.top;
+        els.pagesList.style.transformOrigin = `${midX}px ${midY}px`;
     }
+});
 
-    // Um dedo: PAN ou double-tap
-    if (e.touches.length === 1) {
-        touch.mode = 'pan';
-        touch.startX = e.touches[0].clientX;
-        touch.startY = e.touches[0].clientY;
-        touch.startScrollLeft = els.pdfContainer.scrollLeft;
-        touch.startScrollTop = els.pdfContainer.scrollTop;
+els.pdfContainer.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'touch' || !activePointers.has(e.pointerId)) return;
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-        // Detecta double-tap para zoom rápido
-        const now = Date.now();
-        if (now - touch.lastTapTime < 300) {
-            e.preventDefault();
-            if (state.scale > 1.05) {
-                state.scale = 1.0;
-            } else {
-                state.scale = 2.0;
-            }
-            els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-            renderPage(state.currentPage);
-            touch.lastTapTime = 0;
-            touch.mode = null;
-            return;
-        }
-        touch.lastTapTime = now;
-    }
-}, { passive: false });
-
-els.pdfContainer.addEventListener('touchmove', (e) => {
-    // PINCH: dois dedos → calcula nova escala
-    if (touch.mode === 'pinch' && e.touches.length === 2) {
+    if (pinch.active && activePointers.size === 2) {
         e.preventDefault();
-        const distance = getDistance(e.touches[0], e.touches[1]);
-        const ratio = distance / touch.startDistance;
-        let newScale = touch.startScale * ratio;
-        newScale = Math.max(0.25, Math.min(4, newScale));
-        
-        touch.pendingScale = newScale;
-        touch.isZooming = true;
-        
-        // Atualiza a % em tempo real
+        const ratio = pointersDist() / pinch.startDist;
+        const newScale = Math.max(0.25, Math.min(4, pinch.startScale * ratio));
+        pinch.currentScale = newScale;
+
+        // Prévia instantânea via CSS transform (sem re-renderizar o PDF)
+        els.pagesList.style.transform = `scale(${newScale / pinch.startScale})`;
         els.zoomLevel.textContent = Math.round(newScale * 100) + '%';
-        return;
     }
+});
 
-    // PAN: um dedo → rola o container
-    if (touch.mode === 'pan' && e.touches.length === 1) {
-        const dx = e.touches[0].clientX - touch.startX;
-        const dy = e.touches[0].clientY - touch.startY;
-        
-        // Só previne se realmente está arrastando (evita bloquear cliques)
-        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-            e.preventDefault();
-            els.pdfContainer.scrollLeft = touch.startScrollLeft - dx;
-            els.pdfContainer.scrollTop = touch.startScrollTop - dy;
-        }
+function endPinch() {
+    if (!pinch.active) return;
+    pinch.active = false;
+    els.pagesList.style.transform = '';
+    if (pinch.currentScale) {
+        state.scale = +pinch.currentScale.toFixed(2);
+        applyZoomChange();
     }
+}
+
+function releasePointer(e) {
+    if (e.pointerType !== 'touch') return;
+    activePointers.delete(e.pointerId);
+    if (activePointers.size < 2) endPinch();
+}
+
+els.pdfContainer.addEventListener('pointerup', releasePointer);
+els.pdfContainer.addEventListener('pointercancel', releasePointer);
+els.pdfContainer.addEventListener('pointerleave', releasePointer);
+
+// Zoom com Ctrl + roda do mouse / pinça no trackpad (desktop)
+let wheelZoomTimer = null;
+els.pdfContainer.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const delta = -e.deltaY * 0.01;
+    state.scale = Math.max(0.25, Math.min(4, +(state.scale + delta).toFixed(2)));
+    els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
+
+    clearTimeout(wheelZoomTimer);
+    wheelZoomTimer = setTimeout(applyZoomChange, 150);
 }, { passive: false });
 
-els.pdfContainer.addEventListener('touchend', (e) => {
-    // Finalizou pinch → aplica o zoom de verdade (renderiza)
-    if (touch.mode === 'pinch') {
-        if (touch.isZooming && Math.abs(touch.pendingScale - state.scale) > 0.03) {
-            state.scale = touch.pendingScale;
-            els.zoomLevel.textContent = Math.round(state.scale * 100) + '%';
-            renderPage(state.currentPage);
-        }
-        touch.isZooming = false;
-    }
-
-    // Se ainda há dedos na tela, muda o modo
-    if (e.touches.length === 1) {
-        // Passou de 2 → 1 dedos: reinicia como pan
-        touch.mode = 'pan';
-        touch.startX = e.touches[0].clientX;
-        touch.startY = e.touches[0].clientY;
-        touch.startScrollLeft = els.pdfContainer.scrollLeft;
-        touch.startScrollTop = els.pdfContainer.scrollTop;
-    } else if (e.touches.length === 0) {
-        touch.mode = null;
-    }
-}, { passive: true });
-
-els.pdfContainer.addEventListener('touchcancel', () => {
-    touch.mode = null;
-    touch.isZooming = false;
+// Atualiza o indicador de página conforme o usuário rola no modo contínuo
+els.pdfContainer.addEventListener('scroll', () => {
+    if (state.mode !== 'continuous') return;
+    if (state.scrollRAF) return;
+    state.scrollRAF = requestAnimationFrame(() => {
+        updateCurrentPageFromScroll();
+        state.scrollRAF = null;
+    });
 });
 
 // ============================================
@@ -463,6 +683,7 @@ async function scanPageForQR(pageNum) {
     try {
         const page = await state.pdfDoc.getPage(pageNum);
         
+        // Renderiza em alta resolução para o scan
         const viewport = page.getViewport({ scale: 3.0 });
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
@@ -646,22 +867,14 @@ els.btnNext.addEventListener('click', nextPage);
 els.btnPrev.addEventListener('click', prevPage);
 els.pageInput.addEventListener('change', (e) => goToPage(parseInt(e.target.value)));
 
-// Zoom (botões)
+// Zoom
 els.btnZoomIn.addEventListener('click', zoomIn);
 els.btnZoomOut.addEventListener('click', zoomOut);
 els.btnFullscreen.addEventListener('click', toggleFullscreen);
 
-// Ctrl + scroll → zoom (desktop)
-els.pdfContainer.addEventListener('wheel', (e) => {
-    if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        if (e.deltaY < 0) {
-            zoomIn();
-        } else {
-            zoomOut();
-        }
-    }
-}, { passive: false });
+// Modo de leitura (página única / rolagem contínua)
+els.btnToggleMode.addEventListener('click', toggleReadingMode);
+updateToggleModeButton();
 
 // Scan QR
 els.btnScan.addEventListener('click', openScannerModal);
@@ -676,6 +889,7 @@ els.btnOpen.addEventListener('click', () => els.fileInput.click());
 els.btnBack.addEventListener('click', () => {
     els.viewer.hidden = true;
     els.welcomeScreen.hidden = false;
+    clearPagesList();
     if (state.pdfDoc) {
         state.pdfDoc.destroy();
         state.pdfDoc = null;
@@ -762,8 +976,11 @@ let resizeTimeout;
 window.addEventListener('resize', () => {
     clearTimeout(resizeTimeout);
     resizeTimeout = setTimeout(() => {
-        if (state.pdfDoc && !els.viewer.hidden) {
-            renderPage(state.currentPage);
+        if (!state.pdfDoc || els.viewer.hidden) return;
+        if (state.mode === 'continuous') {
+            rebuildContinuousSizes();
+        } else {
+            renderSinglePage(state.currentPage);
         }
     }, 300);
 });
@@ -773,23 +990,17 @@ window.addEventListener('resize', () => {
 // ============================================
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js', { scope: './' })
-            .then(registration => {
-                console.log('✅ Service Worker registrado');
-                console.log('📍 Escopo:', registration.scope);
-            })
-            .catch(err => {
-                console.error('❌ Service Worker falhou:', err);
-            });
+        navigator.serviceWorker.register('sw.js')
+            .then(() => console.log('✅ Service Worker registrado'))
+            .catch(err => console.log('❌ SW falhou:', err));
     });
 }
 
-// Prevenir zoom de página com gestos
+// Prevenir zoom com gestos
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 
 // ============================================
 // INICIALIZAÇÃO
 // ============================================
-console.log('📄 Leitor de PDF v1.2');
-console.log('👨‍💻 Desenvolvedor: Pr Uanderley');
-console.log('✨ Recursos: Pinch-to-zoom, pan, double-tap, QR Code, PWA');
+console.log('📄 PDF Reader Pro v1.0');
+console.log('✨ Recursos: Alta resolução, QR Code, Histórico');
